@@ -35,6 +35,7 @@ PICTURE_SIZE = (0.14, 0.23)   # longest side of a picture window, as a share of 
 FPS = 60                      # animation frames per second
 PICTURES_DELAY_MS = 400       # the pictures start right after the video does
 SPAWN_INTERVAL_MS = 70        # gap between pictures popping up at the start
+RESPAWN_PER_CLOSE = 1         # pictures that open each time you close one
 POP_TIME = 0.22               # a new picture pops open over this long
 CLOSE_TIME = 0.14             # a closed picture shrinks away over this long
 TITLE_BAR_HEIGHT = 24         # the little title strip on each picture

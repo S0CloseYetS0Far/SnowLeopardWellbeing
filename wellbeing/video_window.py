@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QAbstractAnimation, QEvent, QPoint, QPropertyAnimation, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QAbstractAnimation, QEvent, QPoint, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QCloseEvent, QGuiApplication
 from PySide6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaMetaData, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -15,6 +15,29 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 from . import config
 
 TITLE = "Snow Leopard Wellbeing"
+_ffmpeg_quiet = False
+
+
+def quiet_ffmpeg() -> None:
+    """Keep FFmpeg's codec-probing chatter out of the console.
+
+    Qt's video backend is FFmpeg, which logs straight to stderr. Its DLL ships
+    inside PySide6; loading it here gives the same instance Qt uses. Playback
+    errors still reach us through QMediaPlayer.errorOccurred.
+    """
+    global _ffmpeg_quiet
+    if _ffmpeg_quiet:
+        return
+    _ffmpeg_quiet = True
+    import ctypes
+
+    import PySide6
+
+    for dll in Path(PySide6.__file__).parent.glob("avutil*.dll"):
+        try:
+            ctypes.CDLL(str(dll)).av_log_set_level(8)  # AV_LOG_FATAL
+        except (OSError, AttributeError):
+            pass
 
 
 class VideoWindow(QWidget):
@@ -22,7 +45,10 @@ class VideoWindow(QWidget):
 
     ``refusal()`` gives the text flashed in the title bar when a close is
     refused. ``force_close()`` always works; the kill switch uses it.
+    ``activated`` fires whenever the window becomes the active one.
     """
+
+    activated = Signal()
 
     def __init__(
         self,
@@ -41,6 +67,7 @@ class VideoWindow(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
         )
         super().__init__(None, flags)
+        quiet_ffmpeg()
         self.may_close = may_close
         self.refusal = refusal
         self._forced = False
@@ -128,6 +155,8 @@ class VideoWindow(QWidget):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange and self.isMinimized():
             QTimer.singleShot(0, self._unminimize)
+        elif event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            self.activated.emit()
 
     def _unminimize(self) -> None:
         self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)

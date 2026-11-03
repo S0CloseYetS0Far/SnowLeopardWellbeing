@@ -1,4 +1,8 @@
-"""All the pictures together: popping them up, the shared clock, closing."""
+"""All the pictures together: popping them up, the shared clock, closing.
+
+Closing a picture opens another one straight away, so there are never
+fewer on screen. That keeps going until the script itself is stopped.
+"""
 
 from __future__ import annotations
 
@@ -34,6 +38,7 @@ class Swarm(QObject):
         self.sources = list(pictures)
         self.rng = rng or random.Random()
         self.quitting = False
+        self.started = False
         self.now = 0.0  # seconds since start(); drives every animation
         self._numbers = {source: n for n, source in enumerate(self.sources, 1)}
         self._pixmaps: dict[Path, QPixmap | None] = {}
@@ -64,11 +69,18 @@ class Swarm(QObject):
         """Pictures on screen and not on their way out."""
         return sum(1 for p in self.pictures if not p.closing)
 
+    def all_closed(self) -> bool:
+        """True only when no picture is open or still waiting to pop up."""
+        if not self.sources:
+            return True
+        return self.started and not self._queue and self.open_count == 0
+
     # --- starting and stopping -------------------------------------------------
     def start(self) -> None:
         """Pop every picture up, one after another, and start the clock."""
         self._queue = self.sources[:]
         self.rng.shuffle(self._queue)
+        self.started = True
         self.overlay.show()
         self._clock.start()
         self._frame_timer.start()
@@ -78,6 +90,7 @@ class Swarm(QObject):
         self.quitting = True
         self._spawn_timer.stop()
         self._frame_timer.stop()
+        self._queue.clear()
         self.pictures.clear()
         self.overlay.allow_close = True
         self.overlay.close()
@@ -106,12 +119,23 @@ class Swarm(QObject):
         return picture
 
     def close_picture(self, picture: Picture) -> None:
+        """Close *picture*, and open another one in its place."""
         if picture.closing or picture not in self.pictures:
             return
         picture.closed_at = self.now
         if picture.body.held:
             picture.body.throw(0, 0)
         self.overlay.forget(picture)
+        if not self.quitting:
+            for _ in range(config.RESPAWN_PER_CLOSE):
+                self.spawn(self._replacement_for(picture.source))
+
+    def _replacement_for(self, closed: Path) -> Path:
+        """A different picture, preferably one that is not on screen yet."""
+        showing = {p.source for p in self.pictures if not p.closing} | set(self._queue)
+        unseen = [s for s in self.sources if s not in showing and s != closed]
+        others = [s for s in self.sources if s != closed]
+        return self.rng.choice(unseen or others or self.sources)
 
     def _spawn_next(self) -> None:
         if self.quitting or not self._queue:

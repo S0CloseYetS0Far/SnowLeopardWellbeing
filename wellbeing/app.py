@@ -23,24 +23,6 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _quiet_ffmpeg() -> None:
-    """Keep FFmpeg's codec-probing chatter out of the console.
-
-    Qt's video backend is FFmpeg, which logs straight to stderr. Its DLL ships
-    inside PySide6; loading it here gives the same instance Qt uses. Playback
-    errors still reach us through QMediaPlayer.errorOccurred.
-    """
-    import ctypes
-
-    import PySide6
-
-    for dll in Path(PySide6.__file__).parent.glob("avutil*.dll"):
-        try:
-            ctypes.CDLL(str(dll)).av_log_set_level(8)  # AV_LOG_FATAL
-        except (OSError, AttributeError):
-            pass
-
-
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     found = media.discover(args.pictures, args.video)
@@ -51,7 +33,6 @@ def main(argv: list[str] | None = None) -> int:
 
     # Qt's FFmpeg backend prints a stream dump for every file it opens.
     os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia*=false")
-    _quiet_ffmpeg()
     # Ctrl+C in the console ends the script at once, even inside Qt's loop.
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
@@ -71,7 +52,15 @@ def main(argv: list[str] | None = None) -> int:
 
     video = None
     if found.video:
-        video = VideoWindow(found.video, muted=args.mute, may_close=lambda: False)
+        # The video only closes once every picture is closed, and closing a
+        # picture opens another, so in practice it never closes.
+        video = VideoWindow(
+            found.video,
+            muted=args.mute,
+            may_close=swarm.all_closed,
+            refusal=lambda: f"Nope. {swarm.open_count} snow leopards are still out there.",
+        )
+        video.activated.connect(swarm.overlay.raise_)  # pictures stay in front
         video.start()
     QTimer.singleShot(config.PICTURES_DELAY_MS, swarm.start)
 
