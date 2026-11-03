@@ -1,0 +1,3 @@
+# Qt for Python. The Addons package brings QtMultimedia (video + audio)
+# and pulls in PySide6-Essentials (windows, painting) as a dependency.
+PySide6-Addons>=6.8,<7
