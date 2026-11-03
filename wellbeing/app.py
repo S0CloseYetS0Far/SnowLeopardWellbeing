@@ -34,6 +34,12 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia*=false")
     # Ctrl+C in the console ends the script at once, even inside Qt's loop.
     signal.signal(signal.SIGINT, signal.SIG_DFL)
+    if sys.platform == "win32":
+        # A parent program can start us with Ctrl+C switched off, and that
+        # setting is inherited. Switch it back on so Ctrl+C always works.
+        import ctypes
+
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)
 
     from PySide6.QtCore import QTimer
     from PySide6.QtGui import QKeySequence, QShortcut
