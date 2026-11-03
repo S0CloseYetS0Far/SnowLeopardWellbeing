@@ -29,7 +29,6 @@ def main(argv: list[str] | None = None) -> int:
     print("Snow Leopard Wellbeing")
     print(f"  video    : {found.video.name if found.video else '(none found)'}")
     print(f"  pictures : {len(found.pictures)}")
-    print("To stop: press Ctrl+C in this window, or close this window.")
 
     # Qt's FFmpeg backend prints a stream dump for every file it opens.
     os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia*=false")
@@ -37,9 +36,11 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     from PySide6.QtCore import QTimer
+    from PySide6.QtGui import QKeySequence, QShortcut
     from PySide6.QtWidgets import QApplication
 
     from . import config
+    from .killswitch import HOTKEY_TEXT, KillSwitch
     from .swarm import Swarm
     from .video_window import VideoWindow
 
@@ -64,13 +65,37 @@ def main(argv: list[str] | None = None) -> int:
         video.start()
     QTimer.singleShot(config.PICTURES_DELAY_MS, swarm.start)
 
+    stopping = False
+
     def shutdown() -> None:
         # app.quit() asks every window to close and gives up when one refuses,
         # which the video window always does. exit() cannot be refused.
+        nonlocal stopping
+        if stopping:
+            return
+        stopping = True
+        killswitch.stop()
         swarm.shutdown()
         if video is not None:
             video.force_close()
         app.exit(0)
+
+    killswitch = KillSwitch()
+    killswitch.triggered.connect(shutdown)
+    how = killswitch.start()
+    # While one of our windows has focus the shortcut works on any system.
+    for window in (video, swarm.overlay):
+        if window is not None:
+            shortcut = QShortcut(QKeySequence(HOTKEY_TEXT), window)
+            shortcut.activated.connect(shutdown)
+
+    print()
+    print("To stop it:")
+    if how != "off":
+        print(f"  - press {HOTKEY_TEXT} (works from any window)")
+    else:
+        print(f"  - press {HOTKEY_TEXT} while a snow leopard window is active")
+    print("  - or press Ctrl+C in this window, or close this window")
 
     if args.duration:
         QTimer.singleShot(round(args.duration * 1000), shutdown)
