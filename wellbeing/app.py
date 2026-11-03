@@ -58,25 +58,31 @@ def main(argv: list[str] | None = None) -> int:
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
 
+    from . import config
+    from .swarm import Swarm
     from .video_window import VideoWindow
 
+    if not found.video and not found.pictures:
+        print("Nothing to show.")
+        return 1
+
     app = QApplication(sys.argv[:1])
+    swarm = Swarm(found.pictures)
 
     video = None
     if found.video:
         video = VideoWindow(found.video, muted=args.mute, may_close=lambda: False)
         video.start()
+    QTimer.singleShot(config.PICTURES_DELAY_MS, swarm.start)
 
     def shutdown() -> None:
         # app.quit() asks every window to close and gives up when one refuses,
         # which the video window always does. exit() cannot be refused.
+        swarm.shutdown()
         if video is not None:
             video.force_close()
         app.exit(0)
 
     if args.duration:
         QTimer.singleShot(round(args.duration * 1000), shutdown)
-    if video is None:
-        print("Nothing to show.")
-        return 1
     return app.exec()
