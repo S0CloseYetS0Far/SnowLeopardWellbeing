@@ -55,6 +55,7 @@ class Swarm(QObject):
         self.quitting = False
         self.started = False
         self.now = 0.0  # seconds since start(); drives every animation
+        self.frames = 0
         self._numbers = {source: n for n, source in enumerate(self.sources, 1)}
         self._pixmaps: dict[Path, QPixmap | None] = {}
         self._queue: list[Path] = []
@@ -190,6 +191,7 @@ class Swarm(QObject):
     def _tick(self) -> None:
         dt = min(self._clock.restart() / 1000.0, config.MAX_FRAME_TIME)
         self.now += dt
+        self.frames += 1
         for picture in self.pictures:
             if not picture.closing:
                 picture.body.step(dt)

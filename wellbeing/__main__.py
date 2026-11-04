@@ -1,3 +1,5 @@
-from .app import main
+from wellbeing.app import main
 
-raise SystemExit(main())
+# The guard matters: worker processes import this module again on start-up.
+if __name__ == "__main__":
+    raise SystemExit(main())

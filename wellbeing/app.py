@@ -19,6 +19,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--pictures", type=Path, help="folder of pictures (default: snowleopard/)")
     parser.add_argument("--video", type=Path, help="video file (default: first video in the project folder)")
     parser.add_argument("--mute", action="store_true", help="play the video without sound")
+    parser.add_argument(
+        "--workers", type=int, metavar="N",
+        help="processes to spread the pictures over, for several CPU cores "
+             "(default: half the logical cores, at most 4; 0 = all in one process)",
+    )
     parser.add_argument("--duration", type=float, metavar="SECONDS", help="quit by itself after this many seconds")
     return parser.parse_args(argv)
 
@@ -54,8 +59,16 @@ def main(argv: list[str] | None = None) -> int:
         print("Nothing to show.")
         return 1
 
+    from .workers import WorkerPool, default_count
+
     app = QApplication(sys.argv[:1])
-    swarm = Swarm(found.pictures)
+    workers = default_count() if args.workers is None else max(0, args.workers)
+    workers = min(workers, len(found.pictures))
+    if workers:
+        swarm = WorkerPool(found.pictures, workers)  # several processes, several cores
+    else:
+        swarm = Swarm(found.pictures)
+    print(f"  processes: {workers or 1} for the pictures" + (" (plus this one for the video)" if workers else ""))
 
     video = None
     if found.video:
@@ -69,7 +82,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         video.activated.connect(swarm.raise_)  # pictures stay in front
         video.start()
-    QTimer.singleShot(config.PICTURES_DELAY_MS, swarm.start)
+    if workers:
+        swarm.start()  # workers take about a second to start up anyway
+    else:
+        QTimer.singleShot(config.PICTURES_DELAY_MS, swarm.start)
 
     stopping = False
 
@@ -90,7 +106,9 @@ def main(argv: list[str] | None = None) -> int:
     killswitch.triggered.connect(shutdown)
     how = killswitch.start()
     # While one of our windows has focus the shortcut works on any system.
-    for window in (video, swarm.overlay):
+    if workers:
+        swarm.stop_requested.connect(shutdown)
+    for window in [video, *([] if workers else swarm.overlays.values())]:
         if window is not None:
             shortcut = QShortcut(QKeySequence(HOTKEY_TEXT), window)
             shortcut.activated.connect(shutdown)
