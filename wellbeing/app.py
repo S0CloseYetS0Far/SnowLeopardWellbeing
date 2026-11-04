@@ -67,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
             may_close=swarm.all_closed,
             refusal=lambda: f"Nope. {swarm.open_count} snow leopards are still out there.",
         )
-        video.activated.connect(swarm.overlay.raise_)  # pictures stay in front
+        video.activated.connect(swarm.raise_)  # pictures stay in front
         video.start()
     QTimer.singleShot(config.PICTURES_DELAY_MS, swarm.start)
 

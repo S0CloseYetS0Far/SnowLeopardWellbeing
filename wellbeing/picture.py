@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen, QPixmap, QStaticText
 
 from . import config
@@ -78,6 +78,16 @@ class Picture:
         width = self.body.width * sx
         height = self.body.height * sy
         return QRectF(self.body.x - width / 2, self.body.y - height, width, height)
+
+    def paint_box(self, now: float) -> QRect:
+        """Whole pixels covering everything ``draw`` paints right now."""
+        r = self.rect()
+        size = max(1.0, self.presence(now))  # the opening pop overshoots a little
+        if size != 1.0:
+            centre = r.center()
+            r = QRectF(centre.x() - r.width() * size / 2, centre.y() - r.height() * size / 2,
+                       r.width() * size, r.height() * size)
+        return r.toAlignedRect().adjusted(-2, -2, 2, 2)
 
     def close_rect(self) -> QRectF:
         r = self.rect()

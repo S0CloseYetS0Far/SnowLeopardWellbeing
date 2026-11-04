@@ -2,6 +2,10 @@
 
 Closing a picture opens another one straight away, so there are never
 fewer on screen. That keeps going until the script itself is stopped.
+
+Every monitor gets its own see-through layer, and the pictures share one
+world spanning all of them, so they jump, walk and get thrown from one
+monitor to the next.
 """
 
 from __future__ import annotations
@@ -11,11 +15,11 @@ import random
 from pathlib import Path
 
 from PySide6.QtCore import QElapsedTimer, QObject, QPointF, Qt, QTimer
-from PySide6.QtGui import QCursor, QGuiApplication, QImageReader, QPixmap
+from PySide6.QtGui import QCursor, QGuiApplication, QImageReader, QPixmap, QScreen
 
 from . import config
-from .overlay import Overlay
-from .physics import Body, Bounds
+from .overlay import Overlay, Stage
+from .physics import Body, Bounds, World
 from .picture import Picture
 
 
@@ -31,11 +35,22 @@ def load_pixmap(path: Path, longest: int) -> QPixmap | None:
 
 
 class Swarm(QObject):
-    """Owns every picture, steps their physics and redraws them each frame."""
+    """Owns every picture, steps their physics and redraws them each frame.
 
-    def __init__(self, pictures: list[Path], rng: random.Random | None = None) -> None:
+    *pictures* are all the pictures this swarm may show; *first* (default:
+    all of them) are the ones it opens at the start. Replacements for
+    closed pictures come from all of *pictures*.
+    """
+
+    def __init__(
+        self,
+        pictures: list[Path],
+        rng: random.Random | None = None,
+        first: list[Path] | None = None,
+    ) -> None:
         super().__init__()
         self.sources = list(pictures)
+        self.first = list(self.sources if first is None else first)
         self.rng = rng or random.Random()
         self.quitting = False
         self.started = False
@@ -44,12 +59,14 @@ class Swarm(QObject):
         self._pixmaps: dict[Path, QPixmap | None] = {}
         self._queue: list[Path] = []
 
-        self.overlay = Overlay()
-        self.overlay.close_requested.connect(self.close_picture)
-        self._screen = QGuiApplication.primaryScreen()
-        self.bounds = Bounds(0, 0, 1, 1)  # overlay coordinates; bottom is the floor
-        self._fit_screen()
-        self._screen.availableGeometryChanged.connect(self._fit_screen)
+        self.stage = Stage()
+        self.stage.close_requested.connect(self.close_picture)
+        self.overlays: dict[QScreen, Overlay] = {}
+        self.world = World([Bounds(0, 0, 1, 1)])
+        self._layout()
+        app = QGuiApplication.instance()
+        app.screenAdded.connect(self._screen_added)
+        app.screenRemoved.connect(self._layout)
 
         self._clock = QElapsedTimer()
         self._frame_timer = QTimer(self)
@@ -62,7 +79,13 @@ class Swarm(QObject):
 
     @property
     def pictures(self) -> list[Picture]:
-        return self.overlay.pictures
+        return self.stage.pictures
+
+    @property
+    def overlay(self) -> Overlay:
+        """The layer on the main monitor."""
+        primary = QGuiApplication.primaryScreen()
+        return self.overlays.get(primary) or next(iter(self.overlays.values()))
 
     @property
     def open_count(self) -> int:
@@ -71,20 +94,26 @@ class Swarm(QObject):
 
     def all_closed(self) -> bool:
         """True only when no picture is open or still waiting to pop up."""
-        if not self.sources:
+        if not self.first:
             return True
         return self.started and not self._queue and self.open_count == 0
 
     # --- starting and stopping -------------------------------------------------
     def start(self) -> None:
-        """Pop every picture up, one after another, and start the clock."""
-        self._queue = self.sources[:]
+        """Pop the first pictures up, one after another, and start the clock."""
+        self._queue = self.first[:]
         self.rng.shuffle(self._queue)
         self.started = True
-        self.overlay.show()
+        for overlay in self.overlays.values():
+            overlay.show()
         self._clock.start()
         self._frame_timer.start()
         self._spawn_timer.start()
+
+    def raise_(self) -> None:
+        """Bring every layer above other always-on-top windows (the video)."""
+        for overlay in self.overlays.values():
+            overlay.raise_()
 
     def shutdown(self) -> None:
         self.quitting = True
@@ -92,16 +121,17 @@ class Swarm(QObject):
         self._frame_timer.stop()
         self._queue.clear()
         self.pictures.clear()
-        self.overlay.allow_close = True
-        self.overlay.close()
+        for overlay in self.overlays.values():
+            overlay.allow_close = True
+            overlay.close()
 
     # --- pictures --------------------------------------------------------------
     def spawn(self, source: Path) -> Picture | None:
-        """Open *source* as a new picture somewhere in the top part of the screen."""
+        """Open *source* as a new picture in the top part of a random monitor."""
         pixmap = self._pixmap(source)
         if pixmap is None:
             return None
-        b = self.bounds
+        b = self.rng.choice(self.world.areas)
         longest = self.rng.uniform(*config.PICTURE_SIZE) * (b.bottom - b.top)
         aspect = pixmap.width() / pixmap.height()
         width, height = (longest, longest / aspect) if aspect >= 1 else (longest * aspect, longest)
@@ -109,10 +139,11 @@ class Swarm(QObject):
         x = self.rng.uniform(b.left + width / 2, max(b.left + width / 2, b.right - width / 2))
         y = b.top + height + self.rng.uniform(0, 0.35) * (b.bottom - b.top - height)
         body = Body(
-            width, height, x, y, b,
+            width, height, x, y, self.world,
             vx=self.rng.uniform(-350, 350), vy=self.rng.uniform(-500, 150),
             rng=random.Random(self.rng.random()),  # each picture gets its own dice
         )
+        body.bounds = b
         title = f"Snow Leopard #{self._numbers.get(source, 0)}"
         picture = Picture(pixmap, title, body, source, born=self.now)
         self.pictures.append(picture)
@@ -125,7 +156,7 @@ class Swarm(QObject):
         picture.closed_at = self.now
         if picture.body.held:
             picture.body.throw(0, 0)
-        self.overlay.forget(picture)
+        self.stage.forget(picture)
         if not self.quitting:
             for _ in range(config.RESPAWN_PER_CLOSE):
                 self.spawn(self._replacement_for(picture.source))
@@ -145,10 +176,13 @@ class Swarm(QObject):
 
     def _pixmap(self, source: Path) -> QPixmap | None:
         if source not in self._pixmaps:
-            # Big enough for the largest picture at its widest squash.
-            dpr = self._screen.devicePixelRatio()
-            longest = config.PICTURE_SIZE[1] * (self.bounds.bottom - self.bounds.top)
-            longest = math.ceil(longest / (1 - config.MAX_SQUASH) * dpr)
+            # Big enough for the largest picture at its widest squash, on the
+            # tallest and sharpest monitor.
+            longest = max(
+                (s.availableGeometry().height() * s.devicePixelRatio() for s in self.overlays),
+                default=1080,
+            )
+            longest = math.ceil(config.PICTURE_SIZE[1] * longest / (1 - config.MAX_SQUASH))
             self._pixmaps[source] = load_pixmap(source, longest)
         return self._pixmaps[source]
 
@@ -161,15 +195,39 @@ class Swarm(QObject):
                 picture.body.step(dt)
         self.pictures[:] = [p for p in self.pictures if not p.gone(self.now)]
 
-        cursor = QPointF(self.overlay.mapFromGlobal(QCursor.pos()))
-        inside = self.overlay.rect().contains(cursor.toPoint())
-        self.overlay.update_hover(cursor if inside else None)
-        self.overlay.now = self.now
-        self.overlay.update()
+        cursor = QPointF(QCursor.pos())
+        over_us = any(o.area.contains(cursor.toPoint()) for o in self.overlays.values())
+        self.stage.update_hover(cursor if over_us else None)
+        self.stage.now = self.now
+        boxes = [p.paint_box(self.now) for p in self.pictures]
+        for overlay in self.overlays.values():
+            overlay.refresh(boxes)
 
-    def _fit_screen(self, *_args) -> None:
-        """Cover the screen above the taskbar; its bottom edge is the floor."""
-        area = self._screen.availableGeometry()
-        self.overlay.setGeometry(area)
-        self.bounds.left, self.bounds.top = 0, 0
-        self.bounds.right, self.bounds.bottom = area.width(), area.height()
+    # --- monitors --------------------------------------------------------------
+    def _screen_added(self, screen: QScreen) -> None:
+        self._layout()
+        if self.started and not self.quitting:
+            self.overlays[screen].show()
+
+    def _layout(self, *_args) -> None:
+        """One layer per monitor, covering it above the taskbar; each monitor's
+        free area becomes a room of the world, its bottom edge the floor."""
+        screens = QGuiApplication.screens()
+        for screen in list(self.overlays):
+            if screen not in screens:
+                overlay = self.overlays.pop(screen)
+                overlay.allow_close = True
+                overlay.close()
+                overlay.deleteLater()
+        areas = []
+        for screen in screens:
+            overlay = self.overlays.get(screen)
+            if overlay is None:
+                overlay = self.overlays[screen] = Overlay(self.stage)
+                overlay.setScreen(screen)
+                screen.availableGeometryChanged.connect(self._layout)
+            area = screen.availableGeometry()
+            overlay.setGeometry(area)
+            areas.append(Bounds(area.left(), area.top(), area.left() + area.width(), area.top() + area.height()))
+        if areas:
+            self.world.areas[:] = areas  # bodies notice and find their new room

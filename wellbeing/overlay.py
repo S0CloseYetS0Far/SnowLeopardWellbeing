@@ -1,10 +1,17 @@
-"""The see-through layer over the whole screen that all the pictures live on.
+"""The see-through layers the pictures live on, one per monitor.
 
 Animating dozens of real windows is slow on Windows: every move and resize
 of a native window costs about a millisecond, so 53 of them crawl along at
 under 10 frames a second. Drawing every picture on one transparent,
-always-on-top layer runs at a smooth 60. Clicks on the empty, see-through
-parts fall through to whatever is underneath; clicks on a picture reach it.
+always-on-top layer per monitor runs at a smooth 60. Clicks on the empty,
+see-through parts fall through to whatever is underneath; clicks on a
+picture reach it.
+
+Pictures live in one coordinate space shared by every monitor (Qt's global
+screen coordinates), so a picture can sit across the edge between two
+monitors and each layer draws its own half. The ``Stage`` holds the pictures
+and the mouse state; each ``Overlay`` is a window that draws its part of the
+stage and passes the mouse on to it.
 """
 
 from __future__ import annotations
@@ -12,8 +19,8 @@ from __future__ import annotations
 import time
 from collections import deque
 
-from PySide6.QtCore import QPointF, Qt, Signal
-from PySide6.QtGui import QCloseEvent, QFont, QFontMetrics, QMouseEvent, QPainter, QPaintEvent
+from PySide6.QtCore import QObject, QPointF, QRect, Qt, Signal
+from PySide6.QtGui import QCloseEvent, QFont, QFontMetrics, QMouseEvent, QPainter, QPaintEvent, QRegion
 from PySide6.QtWidgets import QWidget
 
 from .picture import Picture
@@ -21,8 +28,8 @@ from .picture import Picture
 THROW_WINDOW = 0.1  # seconds of mouse movement used to work out a throw
 
 
-class Overlay(QWidget):
-    """Draws ``pictures`` (bottom to top) and turns mouse input into actions.
+class Stage(QObject):
+    """Every picture (bottom to top), in global screen coordinates, and the mouse.
 
     Emits ``close_requested(picture)`` when the user closes a picture with its
     close button, or with Alt+F4 after clicking it.
@@ -31,35 +38,15 @@ class Overlay(QWidget):
     close_requested = Signal(object)
 
     def __init__(self) -> None:
-        flags = (
-            Qt.WindowType.Tool  # no taskbar button
-            | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.NoDropShadowWindowHint
-        )
-        super().__init__(None, flags)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setMouseTracking(True)
-        self.setWindowTitle("Snow Leopards")
-
+        super().__init__()
         self.pictures: list[Picture] = []
         self.now = 0.0
-        self.allow_close = False
-        self._font = QFont("Segoe UI", 9)
-        self._metrics = QFontMetrics(self._font)
+        self.font = QFont("Segoe UI", 9)
+        self.metrics = QFontMetrics(self.font)
         self._held: Picture | None = None
         self._focused: Picture | None = None
         self._grab_offset = QPointF()
         self._trail: deque[tuple[float, float, float]] = deque(maxlen=16)
-
-    # --- drawing ---------------------------------------------------------------
-    def paintEvent(self, _event: QPaintEvent) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        painter.setFont(self._font)
-        for picture in self.pictures:
-            picture.draw(painter, self.now, self._metrics)
 
     # --- finding pictures ------------------------------------------------------
     def picture_at(self, point: QPointF) -> Picture | None:
@@ -81,11 +68,8 @@ class Overlay(QWidget):
         if self._focused is picture:
             self._focused = None
 
-    # --- mouse -----------------------------------------------------------------
-    def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
-        point = event.position()
+    # --- mouse, in global coordinates -------------------------------------------
+    def press(self, point: QPointF) -> None:
         picture = self.picture_at(point)
         if picture is None:
             return
@@ -103,20 +87,16 @@ class Overlay(QWidget):
         self._trail.clear()
         self._trail.append((time.perf_counter(), point.x(), point.y()))
 
-    def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        point = event.position()
+    def move(self, point: QPointF) -> None:
         if self._held is not None:
             self._held.body.move_to(point.x() - self._grab_offset.x(), point.y() - self._grab_offset.y())
             self._trail.append((time.perf_counter(), point.x(), point.y()))
         self.update_hover(point)
 
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton and self._held is not None:
+    def release(self) -> None:
+        if self._held is not None:
             self._held.body.throw(*self._throw_velocity())
             self._held = None
-
-    def leaveEvent(self, _event) -> None:
-        self.update_hover(None)
 
     def _throw_velocity(self) -> tuple[float, float]:
         if len(self._trail) < 2:
@@ -128,6 +108,84 @@ class Overlay(QWidget):
             return 0.0, 0.0
         return (newest[1] - oldest[1]) / elapsed, (newest[2] - oldest[2]) / elapsed
 
+    def alt_f4_target(self) -> Picture | None:
+        """The picture Alt+F4 closes: the one last clicked, else the top one."""
+        target = self._focused
+        if target is None or target.closing:
+            target = next((p for p in reversed(self.pictures) if not p.closing), None)
+        return target
+
+
+class Overlay(QWidget):
+    """A transparent window over one monitor that shows its part of the stage."""
+
+    def __init__(self, stage: Stage) -> None:
+        flags = (
+            Qt.WindowType.Tool  # no taskbar button
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        super().__init__(None, flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setMouseTracking(True)
+        self.setWindowTitle("Snow Leopards")
+        self.stage = stage
+        self.allow_close = False
+        self._dirty = QRegion()  # where pictures were drawn last frame (local)
+
+    @property
+    def area(self) -> QRect:
+        """The part of the global coordinate space this layer covers."""
+        return self.geometry()
+
+    # --- drawing ---------------------------------------------------------------
+    def refresh(self, boxes: list[QRect]) -> None:
+        """Repaint where pictures were last frame and where they are now (global boxes)."""
+        area = self.area
+        origin = area.topLeft()
+        now = QRegion()
+        for box in boxes:
+            if box.intersects(area):
+                now += box.translated(-origin)
+        changed = now + self._dirty
+        self._dirty = now
+        if not changed.isEmpty():
+            self.update(changed)
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        stage = self.stage
+        origin = self.area.topLeft()
+        visible = event.rect().translated(origin)  # global
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.setFont(stage.font)
+        painter.translate(-origin.x(), -origin.y())
+        for picture in stage.pictures:
+            if picture.paint_box(stage.now).intersects(visible):
+                picture.draw(painter, stage.now, stage.metrics)
+
+    # --- mouse -----------------------------------------------------------------
+    def _global(self, event: QMouseEvent) -> QPointF:
+        return event.position() + QPointF(self.area.topLeft())
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.stage.press(self._global(event))
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        # While a picture is held, moves keep coming here even when the mouse
+        # is over another monitor, so a picture can be dragged across.
+        self.stage.move(self._global(event))
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.stage.release()
+
+    def leaveEvent(self, _event) -> None:
+        self.stage.update_hover(None)
+
     # --- closing ---------------------------------------------------------------
     def closeEvent(self, event: QCloseEvent) -> None:
         """Alt+F4 closes the picture last clicked, never the whole layer."""
@@ -135,8 +193,6 @@ class Overlay(QWidget):
             event.accept()
             return
         event.ignore()
-        target = self._focused
-        if target is None or target.closing:
-            target = next((p for p in reversed(self.pictures) if not p.closing), None)
+        target = self.stage.alt_f4_target()
         if target is not None:
-            self.close_requested.emit(target)
+            self.stage.close_requested.emit(target)
